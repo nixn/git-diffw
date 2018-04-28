@@ -28,7 +28,7 @@ to have the original `git diff` still present (unlike in the diff-highlight exam
 
 ## License
 
-MIT. See [LICENSE]() for details.
+MIT. See [LICENSE](LICENSE) for details.
 
 ## Donations
 
