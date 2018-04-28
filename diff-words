@@ -1,0 +1,199 @@
+#!/usr/bin/perl
+
+# MIT License
+#
+# Copyright (c) 2018 nix <https://github.com/nixn>
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# ---
+
+# inspired by https://github.com/git/git/tree/master/contrib/diff-highlight
+
+# TODO handle "\ No newline at end of file"
+
+use 5.008;
+use warnings;
+use strict;
+
+use Text::LevenshteinXS qw(distance);
+
+my $COLOR = qr/(?:\x1b\[[0-9;]*m)/;
+my $IGNORE = qr/(?:$COLOR?[\| ]$COLOR? )*/;
+
+my @removed = ();
+my @added = ();
+
+sub min
+{
+	my $min = shift;
+	while (scalar @_)
+	{
+		my $temp = shift;
+		$min = $temp if $temp < $min;
+	}
+	return $min
+}
+
+sub max
+{
+	my $max = shift;
+	while (scalar @_)
+	{
+		my $temp = shift;
+		$max = $temp if $temp > $max;
+	}
+	return $max
+}
+
+sub diff_similar
+{
+	my ($removed, $added) = @_;
+	my $a = '/tmp/git-diff-words-a';
+	my $b = '/tmp/git-diff-words-b';
+	open(my $ah, '>', $a) or die("Failed to create temporary file $a: $!");
+	print $ah $removed, "\n";
+	close $ah;
+	open(my $bh, '>', $b) or die("Failed to create temporary file $b: $!");
+	print $bh $added, "\n";
+	close $bh;
+	my $diff = `git diff --no-index --color-words $a $b | sed -n 6p`;
+	chomp($diff);
+	return $diff;
+}
+
+sub similar
+{
+	my ($removed, $added) = @_;
+	my $min_equal_chars = 5; # is a const, used only for prefix+suffix checks
+	my $rem = $removed =~ s/^$IGNORE//r =~ s/$COLOR//gr =~ s/^-//r =~ s/\s+/ /gr;
+	my $add = $added =~ s/^$IGNORE//r =~ s/$COLOR//gr =~ s/^\+//r =~ s/\s+/ /gr;
+	my $len_rem = length $rem;
+	my $len_add = length $add;
+	my $min_len = min($len_rem, $len_add);
+	my $chars_to_min = max($min_equal_chars - $min_len, 0);
+	my $lenQ = $min_len + $chars_to_min;
+	my $rem_prefix = substr($rem, 0, $min_len);
+	my $add_prefix = substr($add, 0, $min_len);
+	my $prefix_distance = distance($rem_prefix, $add_prefix);
+	my $prefix_val = 1 - ($prefix_distance + $chars_to_min) / $lenQ;
+	my $rem_suffix = substr($rem, $len_rem - $min_len);
+	my $add_suffix = substr($add, $len_add - $min_len);
+	my $suffix_distance = distance($rem_suffix, $add_suffix);
+	my $suffix_val = 1 - ($suffix_distance + $chars_to_min) / $lenQ;
+	my $len_diff = abs($len_rem - $len_add);
+	my $distance = distance($rem, $add);
+	my $max_distance = $min_len + $len_diff; # this could be 0 when two lines are only whitespace (differing)
+	my $val = $max_distance == 0 ? 0 : 1 - $distance / $max_distance;
+	#print ">>[$prefix_val] [$val] [$suffix_val]<<\n";
+	my $threshold = $min_equal_chars / ($min_equal_chars+1);
+	return max($prefix_val / $threshold, $suffix_val / $threshold, $val / 0.55);
+}
+
+sub find_similar
+{
+	my $needle = shift;
+	my $index = -1;
+	my $val = 1;
+	for (my $i = 0; $i < @_; $i++)
+	{
+		my $new_val = similar($needle, $_[$i]);
+		#print "[$index,$val;$i,$new_val]\n";
+		if ($new_val > $val || ($index < 0 && $new_val == $val))
+		{
+			$index = $i;
+			$val = $new_val;
+		}
+	}
+	return $index;
+}
+
+my $removed_no_eol = 0;
+my $added_no_eol = 0;
+
+sub handle_block
+{
+	my $prefix = '?';
+	while (my $removed = shift @removed)
+	{
+		$prefix = $removed =~ s/^($IGNORE).*/$1/r if $prefix eq '?';
+		my $index = find_similar($removed, @added);
+		if ($index < 0)
+		{
+			print $removed, "\n";
+			next;
+		}
+		for (my $i = 0; $i < $index; $i++)
+		{
+			my $added = shift @added;
+			print $added, "\n";
+		}
+		my $added = shift @added;
+		my $rem = $removed =~ s/^$IGNORE//r =~ s/$COLOR//gr =~ s/^-//r;
+		my $add = $added =~ s/^$IGNORE//r =~ s/$COLOR//gr =~ s/^\+//r;
+		if ($rem eq $add)
+		{
+			print $prefix, " ", $rem, "\n";
+		}
+		else
+		{
+			my $diff = diff_similar($rem, $add);
+			print $prefix, "~", $diff, "\n";
+		}
+	}
+	while (my $added = shift @added)
+	{
+		$prefix = $added =~ s/^($IGNORE).*/$1/r if $prefix eq '?';
+		print $added, "\n";
+	}
+	print($prefix, "\\", $removed_no_eol ? '+' : '-', "\n") if $removed_no_eol != $added_no_eol;
+	$removed_no_eol = 0;
+	$added_no_eol = 0;
+}
+
+while (<>)
+{
+	chomp;
+	my $bw = s/$COLOR//gr;
+	if ($bw =~ /^$IGNORE-/ && $bw !~ m!^$IGNORE--- (a/|/dev/null)!)
+	{
+		push @removed, $_;
+	}
+	elsif ($bw =~ /^$IGNORE\+/ && $bw !~ m!^$IGNORE*\+\+\+ (b/|/dev/null)!)
+	{
+		push @added, $_;
+	}
+	elsif ($bw =~ /^$IGNORE\\ /)
+	{
+		if (@added)
+		{
+			$added_no_eol = 1;
+		}
+		else
+		{
+			$removed_no_eol = 1;
+		}
+	}
+	else
+	{
+		handle_block();
+		print $_, "\n";
+	}
+}
+handle_block();
